@@ -1,0 +1,1261 @@
+---
+title: "iphone and Samsung Galaxy Consumer Sentiments Analysis"
+Date: "September 2019"
+Author: "Itoro Etuks"
+output:  html_notebook
+---
+
+```{r, echo = TRUE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# PROJECT TASKS
+
+1. To apply models to Large Matrix file to complete the analysis of overall sentiment toward both        iPhone and Samsung Galaxy. 
+2. To identify one optimized model to predict the overall sentiment toward iPhones and one               optimized model to predict overall sentiment toward Samsung Galaxy handsets using R for the           analysis.
+
+## Summary of Findings
+
+1. Narrative of the data supported by the results.
+2. How confident the results are.
+3. The reported performance metrics from R
+4. Personal sense of how well the attributes measured will actually capture pages that have              relevant sentiment.
+5. Caveats of this analysis process might not be capturing the sentiment accurately and suggestions      for how to do better in the next round of analysis.
+6. What implications the narrative has for the client’s goals.
+7. High-level explanation of the data analytics performed.
+8. Lessons Learned Report: a report of no more than five pages in Word that includes:
+   For both iPhone and Galaxy:
+8. The classifier selected and the features (attributes) used to train the classifier.
+9. Rationale for selecting the classifier.
+10.Any features eliminated from the data matrics and rationale for doing so.
+11.Comparative performance of the classifiers tried.
+12.What worked well. What didn’t work. What was difficult.What was not difficult.
+13.How the process to execute similar projects should be changed for the future.
+
+```{r}
+#install.packages("Boruta")
+```
+
+```{r results='hide'}
+#Loading Libraries
+library(doParallel) #Setting Up Parallel Processing
+library(caret)
+library(mlbench)
+library(tidyverse)
+library(corrplot)
+library(Hmisc)
+library(C50)
+library(randomForest)
+library(Boruta)
+library(kknn)
+#library(xgboost)
+library(e1071)
+library(plotly)
+```
+
+```{r, results='hide'}
+#Find how many cores are on my machine
+detectCores() 
+
+# Create Cluster with desired number of cores. 
+cl <- makeCluster(2)
+
+# Register Cluster
+registerDoParallel(cl)
+
+#Confirm how many cores are now "assigned" to R and RStudio
+getDoParWorkers() # Result 2 
+```
+```{r}
+#Stop Cluster 
+#stopCluster(cl)
+```
+***
+2. EXPLOARTORY ANALYSIS
+
+The workflow of the project focuses on one small matrix at a time. In the plan of attack we will use iPhone matrix first. Once iPhone modeling and prediction is complete, Galaxy matrix will be imported and perform the same steps. 
+
+```{r, Import-iphoneSM}
+iPhone_Matrix <- read.csv("iphone_smallmatrix_labeled_8d.csv", header = TRUE)
+
+#glimpse(iPhone_Matrix)
+
+plot_ly(iPhone_Matrix, x= ~iPhone_Matrix$iphonesentiment, type='histogram')
+```
+
+```{r, results='hide'}
+dim(iPhone_Matrix)
+
+#Check for missing values
+#is.na(iphone_Matrix)
+#sum(is.na(iPhone_Matrix))
+```
+
+3 FEATURE SELECTION
+
+We will create a new data set for each feature selection method. Then model with each of these new data sets to determine which method, if any, provides the best model accuracy for this project.
+
+3.1 Examine Correlation
+
+While correlation doesn't always imply causation, it's a good practice to begin the analysis by finding the correlation between all the variables. Using cor() function to create a correlation matrix to visualize and ascertain the correlation between all of the features.
+
+```{r, Build-Corraltion-Matrix}
+#Use the cor() function to build the correlation matrix
+CORRiphone_Matrix <- cor(iPhone_Matrix)
+```
+```{r}
+CORRiphone_Matrix
+options(max.print=10000000)
+```
+```{r}
+corrplot(CORRiphone_Matrix)
+```
+
+```{r}
+#Running correlation matrix as p-value
+rCORRiphone_Matrix <- rcorr(as.matrix(CORRiphone_Matrix))
+```
+```{r}
+print(rCORRiphone_Matrix)
+```
+
+```{r, Generate-Corr-matrix-colors}
+#Generating correlation matrix with other colors
+palette = colorRampPalette(c("green", "white", "red")) (20)
+heatmap(x = CORRiphone_Matrix, col = palette, symm = TRUE)
+```
+
+```{r, Remove-Highly-Correlated-variables}
+#Create new df & remove highly correlated features
+iphoneMatrix_Cor <- iPhone_Matrix %>% select(-ios, -htcphone, 
+                                             -samsungdispos, -iphonedispos, -nokiadisunc,
+                                             -sonyperneg, -iosperpos, -iphonecamunc,
+                                             -nokialumina, -googleandroid, -samsungcamneg,
+                                             -sonycamunc, -nokiadispos, -nokiacampos,
+                                             -samsungcamunc, -nokiacamunc, -sonydispos,
+                                             -iphonedisneg, -nokiadisneg, -htcdisneg,
+                                             -samsungdisunc, -nokiadisunc, -samsungperpos,
+                                             -nokiaperpos, -htcperpos, -samsungperneg,
+                                             -samsungperunc, -nokiaperunc, -googleperpos,
+                                             -googleperneg)
+```
+
+```{r}
+glimpse(iphoneMatrix_Cor)
+```
+
+3.2 Examine Feature Variances
+
+The distribution of values within a feature is related to how much information that feature holds in the data set. Features with no variance can be said to hold little to no information. Features that have very little, or "near zero variance", may or may not have useful information. To explore feature variance we can use nearZeroVar() from the caret package.  
+
+nearZeroVar() with saveMetrics = TRUE returns an object containing a table including: frequency ratio, percentage unique, zero variance and near zero variance
+
+```{r}
+#Check for nearZero Variances iphone small matrix
+nzv_iphoneMetrics <- nearZeroVar(iphoneMatrix_Cor, saveMetrics = TRUE)
+nzv_iphoneMetrics
+
+dim(iphoneMatrix_Cor)
+
+#Filtering out nearZeroVar Predictors
+nzv_iphoneMetrics <- nearZeroVar(iphoneMatrix_Cor)
+
+#nearZeroVar() with saveMetrics = FALSE returns a vector 
+#(create indexes of nearZero Variances Predictors)
+nzv <- nearZeroVar(iphoneMatrix_Cor, saveMetrics = FALSE) 
+nzv
+
+#Create new df without nearZeroVar predictors
+filtered_nzv <- iphoneMatrix_Cor[, -nzv]
+dim(filtered_nzv)
+```
+
+FEATURE ELIMINATION APPROACHES
+
+3.3 Approach 1: Recursive Feature Elimination (RFE)
+
+Furthermore, an automated feature selection function, Caret’s rfe() function when used with random forest will try every combination of feature subsets and return a final list of recommended features. 
+
+```{r, Feature-Selection-rfe}
+#take 300 samples of the original data set before applying RFE
+set.seed(123)
+
+iphoneSample_noRFE <- iPhone_Matrix[sample(1:nrow(iPhone_Matrix), 300, replace=FALSE),]
+
+#Set up rfeControl with randomforest with cross validation and no updates
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   repeats = 1,
+                   verbose = FALSE)
+
+#apply rfe to all variables except the target (col 59 "iphonesentiment")
+system.time(rfeResults <- rfe(iphoneSample_noRFE[,1:58],
+                  iphoneSample_noRFE$iphonesentiment,
+                  sizes=c(1:58),
+                  rfeControl=ctrl))
+```
+```{r}
+#Get results
+rfeResults
+```
+```{r}
+#Plot results
+plot(rfeResults, type=c("g", "o"))
+```
+
+The resulting table and plot display each subset and its accuracy and kappa. An asterisk denotes the the number of features that is judged the most optimal from RFE.
+
+3.4 Approach 2: Using Boruta Algorithm for Feature Selection
+
+Boruta is based on RF. It creates shadow attributes of the original attributes with all the values in each shadow attribute shuffled across to create randomness with a good representation of the data. Running 58 attributes on a model creation proves to be very time consuming and takes a lot of system resources. Some of the features were found to be unimportant to the model. Hence, applying this algorithm in our feature selection eliminate all unimportant attributes and allow the model to provide recommended attributes for modeling.
+
+```{r}
+#Using original iphone_Matrix data set
+summary(iPhone_Matrix)
+```
+```{r}
+#create new df copy of original data set
+iphoneMatrix2 <- iPhone_Matrix
+
+#Change dependent variable (iphonesentiment) from integer to factor variable for classifcation model
+iphoneMatrix2$iphonesentiment <- as.factor(iPhone_Matrix$iphonesentiment)
+```
+```{r}
+#Check str, and how many classes in target
+str(iphoneMatrix2)
+
+#Check number of classes
+nlevels(iphoneMatrix2$iphonesentiment)
+```
+
+We have 6 classes in the iphonesentiment. According to iphone Sentiment labeling, these classes represent the following:
+
+0: very negative
+1: negative
+2: somewhat negative
+3: somewhat positive
+4: positive
+5: very positive
+
+
+3.5 Engineering The Dependant Variable
+
+We do not really need 6 levels to understand positive and negative sentiment of iphone. Perhaps combining some of these levels will help increase accuracy and kappa. Using dplyr package recode() function can help us with this. Let's remapped the values as follows:
+
+1: negative
+2: somewhat negative
+3: somewhat positive
+4: positive
+
+```{r, Recoding-iphone-matrix}
+#create a new dataset that will be used for recoding sentiments
+iphoneM_RC <- iphoneMatrix2
+
+#recode sentiments by combining factor levels 0 & 1 and 4 & 5
+iphoneM_RC$iphonesentiment <- recode(iphoneM_RC$iphonesentiment, 
+                                   '0' = 1, '1' = 1, '2' = 2, 
+                                   '3' = 3, '4' = 4, '5' = 4) 
+```
+```{r}
+#inspect levels recode results
+#summary(iphoneM_RC)
+str(iphoneM_RC)
+```
+```{r, Convert-to-factor}
+#convert dependent variable, iphonesentiment to a factor
+iphoneM_RC$iphonesentiment <- as.factor(iphoneM_RC$iphonesentiment)
+nlevels(iphoneM_RC$iphonesentiment)
+```
+
+To perform feature selection using Boruta, let's create a manageable sample size of the data set.
+
+```{r, build-Boruta}
+iphone_Bdf <- iphoneMatrix2[sample(1:nrow(iphoneMatrix2), 1000, replace=FALSE),]
+
+set.seed(111)
+
+#Use Boruta() on the target and include all independent variable. Set doTrace to view progress
+boruta <- Boruta(iphonesentiment~ ., data = iphone_Bdf, doTrace = 2)
+
+#View Boruta output
+print(boruta)
+```
+
+The algorithm after running through 99 iterations, found 8 Tentative attributes, 20 Confirmed Importance attributes and 30 Unconfirmed Importance. To properly classify, we'll need to verify if the 8 tentative attributes are Confirmed Importance or Unconfirmed by running a fix on Boruta.
+
+```{r}
+#vertically placing the chart with axis label font size of 0.65
+plot(boruta, las = 2, cex.axis = 0.65)
+```
+
+From the boxplot above, all Confirmed attributes are colored "green" with their respective level of importance. Unconfirmed attributes are colored in "red". The 8 Tentative attributes (htccamneg, htcperunc, samsungdisunc, etc.) are colored in "yellow" and the shadow attributes are blue. 
+
+The importance of the shadow attributes can be used to measure the importance of each attribute on accuracy of the model. The three blue shadow attributes shown on the boxplot correspond to MIN, AVE, MAX of the shadow attributes' importance level.  
+
+```{r, Boruta-Importance-History}
+plotImpHistory(boruta)
+```
+
+Above plot shows Importance values. Within the blue line are Unconfirmed attributes. Confirmed attributes and their level of importance are represented in green lines. The tentative attributes (no decision from model) falls on the yellow line region.
+
+3.4.1 Fixing Tentative Attributes
+
+```{r, Fixing-undecided-attributes}
+#apply TentativeRoughFix() function to fix the undecided (tentative) attributes
+borFix_df <- TentativeRoughFix(boruta)
+
+print(borFix_df)
+```
+
+```{r}
+glimpse(borFix_df)
+```
+
+The following results obtained after fixing the tentative attributes:
+
+-- Boruta performed 99 iterations in 8.508441 mins.
+-- Tentatives roughfixed over the last 99 iterations.
+-- 20 attributes confirmed important: googleandroid, htccamneg, htccampos, htcdisneg,                    htcdispos and more;
+-- 38 attributes confirmed unimportant: googleperneg, googleperpos, googleperunc,                        htccamunc, htcdisunc and more;
+
+Clearly, TentativeRoughFix function helps us to identify all the Unconfirmed and Confirmed Importance of the attributes and categorize them according to each attribute's importance. 
+
+```{r, Boruta-Stats}
+#obtain attribute stats
+attStats(boruta)
+```
+
+The above stats show detail statistical information of each attribute Importance: Mean, Median, Min, Max, and Norminal History. Previously from the boxplot above, we noticed that attributes like iphone, Samsunggalaxy, ios, iphonedispos, iphonedisunc with normHits of 1.000000 are 100% more important than their shadows. While some attributes with 0.0% have no Importance and were found to be less important than their shadows, thus rejected by the algorithm.
+
+```{r, Confirmed-and-Tentative-attributes}
+#use getNonRejectedFormula() to select Confirmed and Tentative attributes
+getNonRejectedFormula(boruta)
+```
+```{r, Confirmed-Importance}
+#use getConfirmedFormula() to Select only Confirmed Importance
+bor_Results <- getConfirmedFormula(boruta)
+bor_Results
+```
+
+```{r, Recommended-Attributes}
+#Create df of only Confirmed Importance or recommended attributes
+iphoneMatrics20 <- iphoneM_RC %>% select(iphone, samsunggalaxy, sonyxperia, htcphone,
+                                            ios, googleandroid, iphonecampos, htccampos,
+                                            iphonecamneg, iphonecamunc, htccamunc,
+                                            iphonedispos, htcdispos, iphonedisneg,
+                                            iphonedisunc, iphoneperpos, htcperpos,
+                                            iphoneperneg, htcperneg, iphoneperunc,
+                                            iphonesentiment)
+
+str(iphoneMatrics20)
+
+#plot to view distribution of iphone sentiments
+plot_ly(iphoneMatrics20, x= ~iphoneMatrics20$iphonesentiment, 
+                              type='histogram') %>%
+                              layout(title = "Histogram of iphonesentiment",
+                              xaxis = list(title = "Classes"),
+                              yaxis = list(title = "Frequency"))
+  
+```
+
+4. BUILD MODELS
+
+With feature selection and preprocessing of the small matrix file completed, it is time to build models. The initial models will use all 58 attributes from the data set to gain "out of the box" accuracy and kappa. Then, we'll predict again with features selected from data sets. The goal is to find the best combination of data set and algorithm as measured by resulting performance metrics.
+
+4.1 Create Data Partition Using Caret (all 58 independent attributes)
+
+```{r, Data-Partition-Model-Cross-Validation}
+set.seed(222)
+
+#create data partition
+inTraining58 <- createDataPartition(iphoneM_RC$iphonesentiment,
+                                        p = .7, list = FALSE)
+
+#Set Training and Testion Data
+training <- iphoneM_RC[inTraining58,]
+testing <- iphoneM_RC[-inTraining58,]
+
+#train model
+#3 fold cross validation
+fitControl <- trainControl(method = "repeatedcv", number = 3, repeats = 2)
+```
+
+4.2 Random Forest Model (using all variables)
+
+```{r Build-RF-model}
+#train Random Forest classification model
+system.time(iphone58_RF <- train(iphonesentiment~., data = training, 
+                            method = "rf", 
+                            trControl=fitControl, 
+                            tuneLength = 3))
+```
+```{r}
+iphone58_RF
+```
+```{r}
+plot(iphone58_RF)
+```
+
+```{r RF58-Prediction-Confusion-Matrix}
+Pred_rf58 <- predict(iphone58_RF, testing)
+
+#iphone58_RF Create Confusion Matrix
+CM_rf58 <- confusionMatrix(Pred_rf58, testing$iphonesentiment)
+CM_rf58
+```
+
+Random Forest 
+
+9083 samples
+  58 predictor
+   4 classes: '1', '2', '3', '4' 
+
+No pre-processing
+Resampling: Cross-Validated (3 fold, repeated 2 times) 
+Summary of sample sizes: 6055, 6056, 6055, 6056, 6054, 6056, ... 
+Resampling results across tuning parameters:
+
+  mtry  Accuracy   Kappa    
+   2    0.7717732  0.3555679
+  30    0.8496645  0.6284048
+  58    0.8446550  0.6186618
+
+Accuracy was used to select the optimal model using the largest value.
+The final value used for the model was mtry = 30.
+
+The RF model using all 58 attributes obtain 84% Accuracy rate and 62% Kappa. Class 4 (positive iphone sentiment) has the higest sensitivity. This means the model performed the following predictions:
+
+Accurately predicted 
+1 (negative iphone sentiment) -         378 times
+2 (somewhat negative iphone sentiment) - 19 times
+3 (somewhat positive iphone sentiment) -229 times
+4 (positive iphone sentiment) -        2667 times
+
+
+4.3 Building RF Model Using Feature Selection
+
+```{r}
+set.seed(222)
+
+#create data partition using selected data set
+inTraining20 <- createDataPartition(iphoneMatrics20$iphonesentiment, 
+                                    p = .7, list = FALSE)
+
+#Set Training and Testing Data
+training2 <- iphoneMatrics20[inTraining20,]
+testing2 <- iphoneMatrics20[-inTraining20,]
+
+#train model 3 fold cross validation
+fitControl <- trainControl(method = "repeatedcv", number = 3, repeats = 2)
+```
+
+```{r, Random-Forest-Model-Selected-Variables}
+#train Random Forest classification model with a tuneLenght = 3
+system.time(iphone20_RF <- train(iphonesentiment~., data = training2,
+                            method = "rf",
+                            trControl=fitControl,
+                            tuneLength = 3))
+```
+```{r}
+iphone20_RF
+
+#plot rf model
+plot(iphone20_RF)
+```
+
+Random Forest 
+9083 samples
+  20 predictor
+   4 classes: '1', '2', '3', '4' 
+
+No pre-processing
+Resampling: Cross-Validated (3 fold, repeated 2 times) 
+Summary of sample sizes: 6055, 6056, 6055, 6056, 6054, 6056, ... 
+Resampling results across tuning parameters:
+  mtry  Accuracy   Kappa    
+   2    0.8030398  0.4719019
+  11    0.8486738  0.6268412
+  20    0.8438294  0.6176853
+
+Accuracy was used to select the optimal model using the largest value.
+The final value used for the model was mtry = 11.
+
+```{r, rf20-Prediction}
+Pred_rf20 <- predict(iphone20_RF, testing2)
+
+Pred_rf20
+
+#Create Confusion Matrix
+confusionMatrix(Pred_rf20, testing2$iphonesentiment)
+```
+
+#############################################################################################
+
+Confusion Matrix and Statistics
+        Reference
+Prediction    1    2    3    4
+         1  383    3    5   10
+         2    0   19    0    6
+         3    2    0  229    9
+         4  320  114  122 2668
+
+Overall Statistics
+              Accuracy : 0.8481          
+                 95% CI : (0.8364, 0.8592)
+    No Information Rate : 0.6923          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                  Kappa : 0.6218  
+                                          
+The above results show we can significantly reduce the number of attributes by about 50% of the original data set without significantly losing model prediction accuracy. However, we've gain advantage in reducing running time and less system resources used. It's worth to note that the model prediction accuracy has little or no effect with less attributes.
+
+#############################################################################################
+
+5. Build C5.0 Model (using all 58 attributes)
+
+```{r, Build-C50-Model-iphoneSM}
+set.seed(222)
+
+#Run C5.0 Decision tree model 
+system.time(fit_C50model <- train(iphonesentiment~., data = training, 
+                            method='C5.0',
+                            preProcess = c('zv'),
+                            trControl = fitControl))
+```
+```{r}
+fit_C50model
+```
+```{r}
+#plot C50 model
+plot(fit_C50model)
+
+#Checking RF Performance Metrics
+fit_C50model$finalModel
+```
+
+5.1 C5.0 Prediction & Confusion Matrix
+
+```{r, prediction-c50}
+#prediction 
+C50Pred_58 <- predict(fit_C50model, testing)
+
+#confusion matrix
+cmC50_Pred58 <- confusionMatrix(C50Pred_58, testing$iphonesentiment)
+
+cmC50_Pred58
+```
+
+6.0 SVM Model (from the e1071 package) Using All Attributes iphone Small Matrix
+
+```{r}
+library(kernlab) #use for feature selection in svm
+library(ggplot2) #to create boxplot to view data point with svm
+library(reshape2)#will assist in creating boxplots
+library(pROC)
+#library(kknn)
+```
+
+```{r}
+set.seed(222)
+
+#view training and testing data sets of all 58 variables previously created before SVM Modeling
+str(training)
+
+str(testing)
+```
+
+6.1 SVM-Kernel: Radial
+```{r, Build-SVM-radial}
+#Run SVM model (Kernel = radial)
+system.time(fitSVM <- svm(iphonesentiment~., data = training))
+```
+```{r}
+summary(fitSVM)
+```
+
+After building model with the radial kernel, we obtain 3802 support vectors for the 4 classes of iphonesentiment. Class-1 (1218), Class-2 (1491), Class-3 (775), Class-4 (318)
+
+6.1.1 Prediction & Confusion Matrix  for SVM (Radial Function)
+```{r, SVM-redial-prediction}
+#prediction
+rad_Pred <- predict(fitSVM, testing)
+
+#Store the predicted data in a table for analysis
+SMV_table1 <- table(Predicted = rad_Pred, Actual = testing$iphonesentiment)
+SMV_table1
+
+#confusion matrix
+cmSVM1 <- confusionMatrix(rad_Pred, testing$iphonesentiment)
+cmSVM1
+```
+
+############################################################################################
+
+To calculate Model Accuracy: 
+(Sum of Accurately Predicted Data Points / Total Number of Data Points)
+
+Misclassification Rate: (Sum of Misclassified Data Points / Total Number of Data Points) 
+Misclassification Error: 0.2102828
+
+Overall Statistics
+               Accuracy : 0.7897          
+                 95% CI : (0.7766, 0.8024)
+    No Information Rate : 0.6923          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                  Kappa : 0.4565          
+                                          
+ Mcnemar's Test P-Value : < 2.2e-16   
+
+#############################################################################################
+
+```{r}
+#Calculate Accuracy
+sum(diag(SMV_table1))/sum(SMV_table1)
+```
+```{r}
+#Calculate Misclassification Error 
+1 - sum(diag(SMV_table1))/sum(SMV_table1)
+```
+
+6.2 Tunning SVM Model With Linear Function
+
+```{r, SVM-linear-kernel}
+#Run SVM model (Kernel = linear)
+system.time(fitSVM <- svm(iphonesentiment~., data = training, kernel = "linear"))
+
+summary(fitSVM)
+```
+
+```{r, SVM-linear-Prediction}
+#linear kernel prediction
+lin_Pred <- predict(fitSVM, testing)
+
+#Store the predicted data in a table for analysis
+SMV_table2 <- table(Predicted = lin_Pred, Actual = testing$iphonesentiment)
+SMV_table2
+
+#Calculate Accuracy
+sum(diag(SMV_table2))/sum(SMV_table2)
+
+#Calculate Misclassification Error 
+1 - sum(diag(SMV_table2))/sum(SMV_table2)
+
+#confusion matrix
+cmSVM2 <- confusionMatrix(lin_Pred, testing$iphonesentiment)
+cmSVM2
+```
+
+Accuracy: Accuracy : 0.7748
+Misclassification Error: 0.2251928
+
+Above shows linear kernel slightly decreses the Model accuracy rate to 77.48% and the Misclassification rate reduces to about 22.51%
+
+6.3 Tunning SVM Model With Polynomial Function
+```{r, SVM-polynomial-kernel}
+#Run SVM model (Kernel = polynomial)
+system.time(fitSVM <- svm(iphonesentiment~., data = training, kernel = "polynomial"))
+
+summary(fitSVM)
+```
+```{r, Prediction-SVM-polynomial}
+#polynomial Tuning prediction
+pol_Pred <- predict(fitSVM, testing)
+
+#Store the predicted data in a table for analysis
+SVM_table3 <- table(Predicted = pol_Pred, Actual = testing$iphonesentiment)
+SVM_table3
+
+#Calculate Accuracy
+sum(diag(SVM_table3))/sum(SVM_table3)
+
+#Calculate Misclassification Error 
+1 - sum(diag(SVM_table3))/sum(SVM_table3)
+
+cmSVM3 <- confusionMatrix(pol_Pred, testing$iphonesentiment)
+cmSVM3
+```
+
+############################################################################################
+
+Accuracy : 0.7496          
+                 95% CI : (0.7357, 0.7632)
+    No Information Rate : 0.6923          
+    P-Value [Acc > NIR] : 1.676e-15       
+                                          
+  Kappa : 0.2777          
+Misclassification Error: 0.2503856
+
+The polynomial kernel function reduces the Model accuracy rate to 74.96% and the Misclassification Error rate increase to about 25%. Clearly, the Model performs worst with this function.
+
+############################################################################################
+
+
+6.4 Tunning SVM Model With Sigmoid Function
+```{r, SVM-Sigmoid}
+#Run SVM model (Kernel = sigmoid)
+fitSVM <- svm(iphonesentiment~., data = training, kernel = "sigmoid")
+
+summary(fitSVM)
+
+#sigmoid tuning prediction
+sig_Pred <- predict(fitSVM, testing)
+
+#Store the predicted data in a table
+SVM_table4 <- table(Predicted = sig_Pred, Actual = testing$iphonesentiment)
+SVM_table4
+
+#Calculate Accuracy
+sum(diag(SVM_table4))/sum(SVM_table4)
+
+#Calculate Misclassification Error 
+1 - sum(diag(SVM_table4))/sum(SVM_table4)
+
+cmSVM4 <- confusionMatrix(sig_Pred, testing$iphonesentiment)
+cmSVM4
+```
+
+############################################################################################
+
+Confusion Matrix and Statistics
+       Reference
+Prediction    1    2    3    4
+         1  288    6   78   65
+         2    1    0    0    0
+         3   10   16   41    4
+         4  406  114  237 2624
+
+Overall Statistics
+               Accuracy : 0.7591          
+                 95% CI : (0.7454, 0.7725)
+    No Information Rate : 0.6923          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                  Kappa : 0.3598          
+
+Misclassification Error: 0.240874
+
+############################################################################################
+
+From the results, polynomial and sigmoid kernel functions performed worst on this data set and reduce the model accuracy rate to 75.91% and Misclassification Error rate to about 25%. Clearly, svm poorly performs with these functions on this data set.
+
+6.4 Tune SVM Model
+
+It's worth exploring model tunning options to improve the model. Using tune(), ranges and a parameter 'epsilon' with sequence that goes from 0-1 with increment of 0.1 (i.e, epsilon values increase as: (0,0.1:1.0)). let's go up to 0.5 to save time due to a large data set.
+
+Another parameter, "cost" (default value of 1) is used to capture constraint violations. If the cost is too high, the model may expect to store too many support vectors due to high penalty for non-separable data points. This may lead to overfitting. Coversely, if the cost value is too small, the model may be underfitting with lesser accuracy rate. Specifying a large range for cost helps capture optimum cost value. Multiplying 4 cost values by 6 epsilon values will give the model 24 different combinations.
+
+```{r, Tuning-SVM-Model}
+set.seed(222)
+
+#Tunning SVM. cost ranges from 2^2, 2^3.......to 2^5
+#epsilon ranges from 0, 0.1, 0.2.........0.5
+system.time(SVMtune <- tune(svm, iphonesentiment~., data = training,
+                    ranges = list(epsilon = seq(0,1,0.5), cost = 2^(2:5))))
+
+summary(SVMtune)
+
+#Plot SVMtune model Performance Evaluation of SVM
+plot(SVMtune)
+```
+
+The plot of both cost & epsilon parameters used in tuning the model is shown above.
+Darker blue area represent higher accuracy/lower misclassification error region and vice vesa.
+
+Parameter tuning of svm:
+
+- sampling method: 10-fold cross validation 
+- best parameters: epsilon 0 and cost 32
+- best performance: error 0.268632 
+- This means that the model used 10-fold CV and at cost value = 0 and epsilon value = 32,
+  and achieved lowest misclassification error of 0.268632
+
+```{r, Selecting-best-SVM-model}
+#selecting best svm model
+SVM_bestM <- SVMtune$best.model
+
+summary(SVM_bestM)
+```
+
+```{r, Prediction-tuned-SVM}
+
+SVMtune_Pred <- predict(SVM_bestM, testing)
+
+#Store the predicted data in a table
+SVM_table5 <- table(Predicted = SVMtune_Pred, Actual = testing$iphonesentiment)
+SVM_table5
+
+sum(diag(SVM_table5))/sum(SVM_table5)
+
+#Calculate Misclassification Error 
+1 - sum(diag(SVM_table5))/sum(SVM_table5)
+
+#Confusion Matrix
+CM_svm <- confusionMatrix(SVMtune_Pred, testing$iphonesentiment)
+CM_svm
+```
+Tunning the model helps to obtain higher performance but still lower than performances from other models.
+
+8.0 Gradrient Boosting Model on All Attributes
+
+```{r, Build-gbm}
+set.seed(222)
+
+system.time(gbmFit <- train(iphonesentiment ~., data = training,
+                 method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE))
+
+gbmFit
+
+plot(gbmFit)
+```
+```{r, gbm-Prediction- all-attributes}
+gbmPred <- predict(gbmFit, testing)
+
+#Store prediction in a table
+gbmtable <- table(Predicted = gbmPred, Actual = testing$iphonesentiment)
+gbmtable
+```
+```{r, gbm-Confusion-Matrix}
+
+CM_gbm <- confusionMatrix(gbmPred, testing$iphonesentiment)
+CM_gbm
+
+#verify Accuracy
+sum(diag(gbmtable))/sum(gbmtable)
+
+#Calculate Misclassification Error 
+1 - sum(diag(gbmtable))/sum(gbmtable)
+```
+
+
+9.0 Compare Models Evaluating Performance Metrics
+
+```{r}
+require(reshape2)
+```
+
+```{r, Compare-Models-iphone-Small-Matrix}
+model_list <- list(c5.0 = fit_C50model,
+                   rf = iphone58_RF,
+                   gbm = gbmFit)
+
+
+resamp <- resamples(model_list)
+resamp
+
+#Plot models summary 
+bwplot(resamp)
+```
+
+10. Model and Prediction Using Selected Attributes
+
+The most optimized model selected is gbm based on its performance metrics. GBM is applied to predict the iphone sentiment using selected features and measure its Accuracy and Kappa.
+
+```{r, Model-GBM-iphone20-matrix}
+set.seed(222)
+
+#train gbm model on selected 20 variables
+system.time(iphone20_gbm <- train(iphonesentiment ~., data = training2,
+                 method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE))
+
+
+iphone20_gbm
+
+#plot gbm model
+plot(iphone20_gbm)
+```
+
+```{r, GBM-Prediction-and-Confusion}
+#prediction
+gbmPRED_20 <- predict(iphone20_gbm, testing2)
+
+#confusion matrix
+CM_gbm <- confusionMatrix(gbmPRED_20, testing2$iphonesentiment)
+CM_gbm
+```
+```{r}
+#Store prediction in a table
+gbm20table <- table(Predicted = gbmPRED_20, Actual = testing2$iphonesentiment)
+gbm20table
+
+#calculate Missclassification Error
+1 - sum(diag(gbm20table))/sum(gbm20table)
+```
+
+```{r}
+#postResample
+postResample(pred = gbmPRED_20, obs = as.factor(testing2$iphonesentiment))
+```
+
+11.0 Prediction and Confusion Matrics on iphoneLarge Matrix
+
+```{r, Import-iphone-Large-Matrix}
+iPhone_LargeMatrix <- read.csv("iphoneLargeMatrix.csv", header = TRUE)  
+
+#glimpse(iPhone_LargeMatrix)
+```
+
+```{r}
+str(iPhone_LargeMatrix)
+```
+
+```{r, recommended-attributes-large-matrix}
+
+iphone_LargeMatrics20 <- iPhone_LargeMatrix %>% select(iphone, samsunggalaxy, sonyxperia,
+                                            htcphone,ios, googleandroid, iphonecampos,
+                                            htccampos,
+                                            iphonecamneg, iphonecamunc, htccamunc,
+                                            iphonedispos, htcdispos, iphonedisneg,
+                                            iphonedisunc, iphoneperpos, htcperpos,
+                                            iphoneperneg, htcperneg, iphoneperunc,
+                                            iphonesentiment)
+
+glimpse(iphone_LargeMatrics20)
+
+#create a factor target variable
+iphone_LargeMatrics20$iphonesentiment <- as.factor(iphone_LargeMatrics20$iphonesentiment)
+str(iphone_LargeMatrics20)
+```
+
+12. Final iphone Sentiments Prediction
+
+```{r, Final-Prediction-iphoneSentiment}
+#Gradient Boosted Model
+gbmPRED_LM20 <- predict(iphone20_gbm, iphone_LargeMatrics20)
+```
+
+```{r}
+#Plot prediction results
+plot(gbmPRED_LM20)
+
+#Add predictions to the iphone Large matrix data set 
+Final_iphoneSentiment <- iPhone_LargeMatrix 
+
+Final_iphoneSentiment$iphonesentiment <- gbmPRED_LM20
+
+#glimpse(gbmPRED_LM20)
+```
+```{r, Plot-final-iphonesentiment}
+plot_ly(Final_iphoneSentiment, x= ~Final_iphoneSentiment$iphonesentiment,
+                              type='histogram') %>%
+                              layout(title = "Histogram of iphonesentiment",
+                              xaxis = list(title = "Classes"),
+                              yaxis = list(title = "Frequency"))
+
+```
+
+```{r, Load-Final-iphoneSentiment-file}
+#Create a csv file and write it to local drive 
+write.csv(Final_iphoneSentiment, file="iphoneSentiments.csv", row.names = TRUE)
+```
+
+
+13 PREDICTION FOR SAMSUNG SENTIMENTS
+
+13.1 Exploratory Analysis
+
+The second part of the project workflow is to focus on galaxy small matrix to perform similar analysis and predictions. 
+```{r, Import-galaxy-Small-Matrix-File}
+galaxy_Matrix <- read.csv("galaxy_smallmatrix_labeled_9d.csv", header = TRUE)
+
+glimpse(galaxy_Matrix)
+
+plot_ly(galaxy_Matrix, x= ~galaxy_Matrix$galaxysentiment, type='histogram')
+```
+```{r}
+str(galaxy_Matrix)
+```
+
+13.2 Feature Selection
+
+```{r, Examine-Correlation-galaxyMatrix}
+#Use the cor() function to build the correlation matrix
+CORRgalaxy_Matrix <- cor(galaxy_Matrix)
+```
+```{r}
+CORRgalaxy_Matrix
+options(max.print=10000000)
+```
+
+```{r Plotting Heatmap}
+corrplot(CORRgalaxy_Matrix)
+```
+
+```{r Running Correlation Matrix as p-value}
+rCORRgalaxy_Matrix <- rcorr(as.matrix(CORRgalaxy_Matrix))
+```
+```{r}
+print(rCORRgalaxy_Matrix)
+```
+
+13.3 FEATURE ELIMINATION APPROACHES
+
+Approach 1: Recursive Feature Elimination (RFE)
+
+Caret's RFE function is a form of automated feature selection. The function with random forest will try every combination of feature subsets and return a final list of recommended features. Now, let's use RFE function to remove unwanted attributes from galaxy small matrix data set. Since, RFE does not use the target so it must be removed from the data set before implementation and then added back in before modeling"
+
+```{r, rfeControl-galaxysmallmatrix}
+#take 1000 samples the original data set before applying RFE
+set.seed(123)
+
+galaxySample_noRFE <- galaxy_Matrix[sample(1:nrow(galaxy_Matrix), 1000, replace=FALSE),]
+
+#set up rfeControl with random forest, repeated cross validation and no updates
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   repeats = 1,
+                   verbose = FALSE)
+```
+```{r, message=TRUE, warning=TRUE, paged.print=TRUE}
+#Now apply rfe function to all variables except target
+system.time(rfeResults <- rfe(galaxySample_noRFE[,1:58],
+                  galaxySample_noRFE$galaxysentiment,
+                  sizes=c(1:58),
+                  rfeControl=ctrl))
+
+#Get results
+rfeResults
+```
+```{r}
+# Plot results
+plot(rfeResults, type=c("g", "o"))
+```
+
+The resulting table and plot display each subset and its accuracy and kappa. An asterisk denotes the the number of features that is judged the most optimal from RFE. 
+
+It's worth to note here that, unlike the results from Boruta model used previously in iphone feature selection, RFE model only found 2 attributes as unimportant to building rf model. We'll use the recommended attributes in building the models for galaxy sentiment predictions.
+After identifying unwanted attributes, we'll need to create a new data set and add back the dependent variable.  
+
+```{r, Store-Recommended-Attributes}
+#create new data set with rfe recommended features
+galaxyRFE <- galaxy_Matrix[,predictors(rfeResults)]
+```
+```{r}
+#glimpse(galaxyRFE)
+
+#add the dependent variable to galaxyRFE
+galaxyRFE$galaxysentiment <- galaxy_Matrix$galaxysentiment
+
+#review outcome
+str(galaxyRFE)
+```
+
+```{r}
+#convert target variable to factor
+galaxy_Matrix$galaxysentiment <- as.factor(galaxy_Matrix$galaxysentiment)
+```
+```{r}
+str(galaxy_Matrix)
+```
+```{r}
+galaxyRFE$galaxysentiment <- as.factor(galaxyRFE$galaxysentiment)
+#str(galaxyRFE)
+```
+
+
+13.4 Engineering Dependent Variable
+
+We do not really need 6 levels to understand positive and negative sentiment of Samsung galaxy. Perhaps combining some of these levels will help increase accuracy and kappa. Let's remapped the values as follows:
+
+1: negative
+2: somewhat negative
+3: somewhat positive
+4: positive
+
+```{r}
+#create a new dataset that will be used for recoding sentiment
+galaxyM_RC <- galaxyRFE
+```
+```{r}
+#recode sentiment to combine factor levels 0 & 1 and 4 & 5
+galaxyM_RC$galaxysentiment <- recode(galaxyM_RC$galaxysentiment, 
+                                   '0' = 1, '1' = 1, '2' = 2, 
+                                   '3' = 3, '4' = 4, '5' = 4) 
+```
+```{r}
+#make dependent a factor again
+galaxyM_RC$galaxysentiment <- as.factor(galaxyM_RC$galaxysentiment)
+#str(galaxyM_RC)
+```
+```{r}
+#check and verify classes
+nlevels(galaxyM_RC$galaxysentiment)
+```
+```{r}
+#plot distribution of data set
+plot_ly(galaxyM_RC, x= ~galaxyM_RC$galaxysentiment, 
+                              type='histogram') %>%
+                              layout(title = "Histogram of galaxysentiment",
+                              xaxis = list(title = "Classes"),
+                              yaxis = list(title = "Frequency"))
+  
+```
+
+14 Build 4 Models To Predict Galaxy Sentiments
+
+Our experience from iphone sentinment modeling and prediction showed that 3 algorithms (rf, C5.0, gbm) proved to do well. We'll concentrate on these 3 algorithms and select the most optimized model to predict final Samsung galaxy sentiments.
+
+```{r, Data-Partition}
+set.seed(222)
+
+#create data partition using selected galaxy matrix data set
+inTrain_G56 <- createDataPartition(galaxyM_RC$galaxysentiment,
+                                        p = .7, list = FALSE)
+
+#Set Training and Testing Data
+G56_train <- galaxyM_RC[inTrain_G56,]
+G56_test <- galaxyM_RC[-inTrain_G56,]
+
+#train model with 3 fold cross validation
+fitControl <- trainControl(method = "repeatedcv", number = 3, repeats = 2)
+```
+
+14.1 Random Forest Model
+
+```{r, Build-RF Model-galaxysentiment}
+#train Random Forest classification model with a tuneLenght = 3. 
+system.time(G56_rf <- train(galaxysentiment~., data = G56_train, 
+                            method = "rf", 
+                            trControl=fitControl, 
+                            tuneLength = 3))
+```
+```{r}
+G56_rf
+```
+```{r}
+plot(G56_rf)
+```
+
+```{r, RF-Prediction-Confusion-Matrix}
+#rf prediction
+G56rf_PRED <- predict(G56_rf, G56_test)
+```
+```{r}
+#Create RF prediction Confusion Matrix
+cmG56rf_PRED <- confusionMatrix(G56rf_PRED, G56_test$galaxysentiment)
+cmG56rf_PRED
+```
+
+14.2. C5.0 Model
+
+```{r, Build-C50Model}
+set.seed(222)
+
+#Run C5.0 Decision tree model 
+system.time(G56_C50 <- train(galaxysentiment~., data = G56_train, 
+                            method='C5.0',
+                            preProcess = c('zv'),
+                            trControl = fitControl))
+```
+```{r}
+G56_C50
+
+#plot C5.0 model
+plot(G56_C50)
+```
+```{r, C50-Prediction-galaxy}
+#prediction with C5.0
+G56_C50_PRED <- predict(G56_C50, G56_test)
+
+cmC50_Pred58 <- confusionMatrix(G56_C50_PRED, G56_test$galaxysentiment)
+
+cmC50_Pred58
+```
+
+14.3 Gradrient Boost Model
+
+```{r, Build-gbm-Galaxysentiment}
+set.seed(222)
+
+system.time(G56_gbm <- train(galaxysentiment ~., data = G56_train,
+                 method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE))
+
+G56_gbm
+```
+```{r}
+#plot gbm model
+plot(G56_gbm)
+```
+
+```{r, gbm-Prediction-galaxy}
+#galaxy prediction and confusion matrix - 
+G56_gbmPred <- predict(G56_gbm, G56_test)
+
+#Confusion Matrix
+cm_G56gbm <- confusionMatrix(G56_gbmPred, G56_test$galaxysentiment)
+cm_G56gbm
+```
+       
+```{r, Calculating-Accuracy-and-Kappa}
+#Checking Prediction (tbl only). Store the predicted data in a table for analysis
+G56_gbmtable <- table(Predicted = G56_gbmPred, Actual = G56_test$galaxysentiment)
+G56_gbmtable
+
+#Calculate Accuracy
+sum(diag(G56_gbmtable))/sum(G56_gbmtable)
+
+#Calculate Misclassification Error 
+1 - sum(diag(G56_gbmtable))/sum(G56_gbmtable)
+```
+
+14.4 Variable Importance
+
+Caret’s varImp() function is another method of feature selection that returns a ranked list of features from a decision tree model. The ranked list can be used to select features importance. Let's use VarImp() to ascertain how the model prioritized each feature in the training.
+
+```{r, GBM-Variable-Importance}
+varImp(G56_C50)
+```
+
+```{r, Add-prediction-to-galaxy-small-matrix}
+#Add prediction to galaxy small matrix
+P_small_galaxySentiment <- G56_test
+
+P_small_galaxySentiment$galaxysentiment <- G56_gbmPred
+
+#glimpse(P_small_galaxySentiment)
+```
+
+```{r, check-the-sentiment-counts-for-each-level}
+summary(G56_gbmPred)
+
+```
+```{r}
+#Plot predicted galaxy sentiment
+plot_ly(P_small_galaxySentiment, x= ~P_small_galaxySentiment$galaxysentiment,
+                              type='histogram') %>%
+                              layout(title = "Histogram of Galaxysentiment",
+                              xaxis = list(title = "Classes"),
+                              yaxis = list(title = "Frequency"))
+```
+
+15.0 Models Comparison
+
+Caret::resamples function is used to compare the models and pick the one with the highest AUC and lowest AUC standard deviation.
+
+```{r, Compare-Models-galaxysentiment}
+Gmodel_list <- list(c5.0 = G56_C50,
+                      rf = G56_rf,
+                     gbm = G56_gbm)
+
+
+resamp <- resamples(Gmodel_list)
+#summarise distribution
+summary(resamp)
+```
+```{r}
+
+#Plot models summary 
+bwplot(resamp)
+
+#dot plots of results
+dotplot(resamp)
+```
+
+```{r, Load-final-galaxysentiment-Prediction, echo=FALSE}
+#Create a csv file and write it to your hard drive. 
+write.csv(P_small_galaxySentiment, file="galaxysentiment.csv", row.names = TRUE)
+```
+
